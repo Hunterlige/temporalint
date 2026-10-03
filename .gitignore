@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+
+# uv
+.uv/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+
+# Generated stubs
+typings_generated/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Local agent instructions
+AGENTS.md

@@ -1,0 +1,137 @@
+[project]
+name = "temporalint"
+version = "0.1.0"
+description = "Static checks for Temporal Python SDK usage."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Denis Lusson", email = "denis.lusson@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+temporalint = "temporalint:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+force-exclude = true
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "A001",
+    "B",
+    "BLE",
+    "C",
+    "COM",
+    "D",
+    "DTZ",
+    "E",
+    "ERA",
+    "EXE",
+    "F",
+    "FA",
+    "FBT",
+    "FIX",
+    "FURB",
+    "G",
+    "I",
+    "ICN",
+    "INP",
+    "ISC002",
+    "N",
+    "NPY",
+    "PD",
+    "PERF",
+    "PGH",
+    "PIE",
+    "PL",
+    "PLC",
+    "PLR",
+    "PT",
+    "PTH",
+    "PYI",
+    "Q",
+    "RET",
+    "RSE",
+    "RUF",
+    "S101",
+    "SIM",
+    "SLF",
+    "SLOT",
+    "T10",
+    "T20",
+    "TD",
+    "TID",
+    "TRY",
+    "UP",
+    "W",
+    "YTT",
+]
+ignore = [
+    "COM812",
+    "C901",
+    "ISC003",
+    "TD003",
+    "FIX002",
+    "RSE102",
+    "TRY003",
+    "D102",
+    "D103",
+    "D105",
+    "D107",
+    "ERA001",
+    "G003",
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "UP047",
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "D102",
+    "D103",
+    "D104",
+    "PLR2004",
+    "SLF001",
+    "INP001",
+    "PLR0913",
+    "S101",
+    "TID253",
+]
+
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "strict"
+reportCallInDefaultInitializer = "error"
+reportImplicitStringConcatenation = "error"
+reportImportCycles = "error"
+reportPropertyTypeMismatch = "error"
+reportUninitializedInstanceVariable = "error"
+reportUnnecessaryTypeIgnoreComment = "error"
+reportUnreachable = "error"
+reportUnusedCallResult = "error"
+reportMissingParameterType = "none"
+reportMissingTypeStubs = "none"
+reportPrivateUsage = "none"
+reportUnusedImport = "none"
+pythonVersion = "3.14"
+pythonPlatform = "Linux"
+venvPath = "."
+venv = ".venv"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "ruff>=0.16.10",
+]
