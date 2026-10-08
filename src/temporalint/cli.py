@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     _ = parser.add_argument(
         "--select",
-        help="Comma-separated rule codes to enable (default: all rules)",
+        help="Comma-separated rule codes to enable (default: all rules except TPL003)",
     )
     _ = parser.add_argument(
         "--ignore",

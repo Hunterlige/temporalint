@@ -5,7 +5,9 @@ resolved (dot imports, star imports, helpers defined elsewhere) are skipped.
 """
 
 import ast
-from collections.abc import Callable
+import builtins
+import sys
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,6 +15,12 @@ from temporalint.diagnostics import Diagnostic
 from temporalint.imports import ImportResolver
 
 WORKFLOW = "temporalio.workflow"
+ACTIVITY = "temporalio.activity"
+_RETRY_POLICY = "temporalio.common.RetryPolicy"
+# Index of maximum_attempts among the positional RetryPolicy fields.
+_MAX_ATTEMPTS_POSITION = 3
+
+FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
 
 _ACTIVITY_FUNCS = {
     "execute_activity",
@@ -66,6 +74,15 @@ _ARG_AND_ARGS_FUNCS = _ACTIVITY_FUNCS | {
     "start_child_workflow",
 }
 
+# Local activities cannot heartbeat, so they take no heartbeat_timeout. The
+# _class variants are skipped because the activity callable is not a plain def.
+_HEARTBEAT_FUNCS = {
+    "execute_activity",
+    "execute_activity_method",
+    "start_activity",
+    "start_activity_method",
+}
+
 
 @dataclass(frozen=True)
 class Rule:
@@ -74,6 +91,7 @@ class Rule:
     code: str
     name: str
     description: str
+    default: bool = True
 
 
 RULES: tuple[Rule, ...] = (
@@ -84,40 +102,61 @@ RULES: tuple[Rule, ...] = (
     ),
     Rule(
         "TPL002",
-        "missing-await",
-        "Async workflow APIs must be awaited.",
-    ),
-    Rule(
-        "TPL003",
-        "workflow-defn-shape",
-        "A @workflow.defn class needs exactly one async @workflow.run method.",
-    ),
-    Rule(
-        "TPL004",
-        "nondeterministic-call",
-        "Workflow code must not call nondeterministic stdlib functions.",
-    ),
-    Rule(
-        "TPL005",
-        "workflow-logger",
-        "Workflow code must log with workflow.logger, not print or logging.",
-    ),
-    Rule(
-        "TPL015",
         "arg-and-args",
         "Activity and child-workflow calls cannot pass both arg and a non-empty args.",
     ),
     Rule(
-        "TPL018",
+        "TPL003",
+        "activity-unlimited-retry",
+        "Activity calls should bound retries with maximum_attempts or schedule_to_close_timeout.",
+        default=False,
+    ),
+    Rule(
+        "TPL004",
+        "missing-heartbeat",
+        "An activity started with heartbeat_timeout must call activity.heartbeat.",
+    ),
+    Rule(
+        "TPL005",
+        "workflow-defn-shape",
+        "A @workflow.defn class needs exactly one async @workflow.run method.",
+    ),
+    Rule(
+        "TPL006",
+        "query-without-return",
+        "A @workflow.query method must return a value.",
+    ),
+    Rule(
+        "TPL007",
+        "missing-await",
+        "Async workflow APIs must be awaited.",
+    ),
+    Rule(
+        "TPL008",
+        "nondeterministic-call",
+        "Workflow code must not call nondeterministic stdlib functions.",
+    ),
+    Rule(
+        "TPL009",
+        "workflow-logger",
+        "Workflow code must log with workflow.logger, not print or logging.",
+    ),
+    Rule(
+        "TPL010",
         "workflow-exception",
         "Workflow code must fail with ApplicationError, not a non-Temporal exception.",
     ),
 )
 
 RULE_CODES = {rule.code for rule in RULES}
+DEFAULT_CODES = {rule.code for rule in RULES if rule.default}
 
 
 def _empty_classes() -> dict[str, ast.ClassDef | None]:
+    return {}
+
+
+def _empty_functions() -> dict[str, FunctionNode | None]:
     return {}
 
 
@@ -131,6 +170,7 @@ class CheckContext:
     enabled: set[str]
     diagnostics: list[Diagnostic]
     classes: dict[str, ast.ClassDef | None] = field(default_factory=_empty_classes)
+    functions: dict[str, FunctionNode | None] = field(default_factory=_empty_functions)
 
     def report(self, node: ast.expr | ast.stmt, code: str, message: str) -> None:
         if code not in self.enabled:
@@ -225,7 +265,204 @@ def check_arg_and_args(ctx: CheckContext, node: ast.AST) -> None:
     args_value = _keyword_value(node, "args")
     if args_value is None or not _is_nonempty_sequence_literal(args_value):
         return
-    ctx.report(node, "TPL015", f"{name} passes both arg and a non-empty args")
+    ctx.report(node, "TPL002", f"{name} passes both arg and a non-empty args")
+
+
+def _is_none(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _is_unlimited_retry_policy(resolver: ImportResolver, node: ast.expr) -> bool:
+    if _is_none(node):
+        return True
+    if not isinstance(node, ast.Call) or resolver.resolve(node.func) != _RETRY_POLICY:
+        return False
+    if _has_star_kwargs(node) or any(isinstance(arg, ast.Starred) for arg in node.args):
+        return False
+    attempts = (
+        node.args[_MAX_ATTEMPTS_POSITION]
+        if len(node.args) > _MAX_ATTEMPTS_POSITION
+        else _keyword_value(node, "maximum_attempts")
+    )
+    if attempts is None:
+        return True
+    return (
+        isinstance(attempts, ast.Constant) and type(attempts.value) is int and attempts.value == 0
+    )
+
+
+def check_activity_retry(ctx: CheckContext, node: ast.AST) -> None:
+    if not isinstance(node, ast.Call):
+        return
+    name = _workflow_call_name(ctx.resolver, node.func, _ACTIVITY_FUNCS)
+    if name is None or _has_star_kwargs(node):
+        return
+    deadline = _keyword_value(node, "schedule_to_close_timeout")
+    if deadline is not None and not _is_none(deadline):
+        return
+    policy = _keyword_value(node, "retry_policy")
+    if policy is None:
+        ctx.report(
+            node,
+            "TPL003",
+            f"{name} sets no retry_policy; activities retry without limit by default",
+        )
+    elif _is_unlimited_retry_policy(ctx.resolver, policy):
+        ctx.report(
+            node,
+            "TPL003",
+            f"{name} retry_policy sets no maximum_attempts; the activity retries without limit",
+        )
+
+
+def _own_nodes(function: FunctionNode) -> Iterator[ast.AST]:
+    pending: list[ast.AST] = list(function.body)
+    while pending:
+        current = pending.pop()
+        yield current
+        if not isinstance(
+            current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+        ):
+            pending.extend(ast.iter_child_nodes(current))
+
+
+def _is_stub(body: list[ast.stmt]) -> bool:
+    for statement in body:
+        if isinstance(statement, (ast.Pass, ast.Raise)):
+            continue
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
+            continue
+        return False
+    return True
+
+
+def check_query_return(ctx: CheckContext, node: ast.AST) -> None:
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return
+    if not _has_decorator(ctx.resolver, node, f"{WORKFLOW}.query") or _is_stub(node.body):
+        return
+    for child in _own_nodes(node):
+        if isinstance(child, (ast.Yield, ast.YieldFrom)):
+            return
+        if isinstance(child, ast.Return) and child.value is not None and not _is_none(child.value):
+            return
+    ctx.report(node, "TPL006", f'query "{node.name}" returns no value')
+
+
+def _class_method(definition: ast.ClassDef, name: str) -> FunctionNode | None:
+    found = [
+        statement
+        for statement in definition.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)) and statement.name == name
+    ]
+    return found[0] if len(found) == 1 else None
+
+
+def _activity_target(
+    ctx: CheckContext, name: str, node: ast.Call
+) -> tuple[FunctionNode, ast.ClassDef | None] | None:
+    target = node.args[0] if node.args else _keyword_value(node, "activity")
+    if name.endswith("_method"):
+        if not isinstance(target, ast.Attribute) or not isinstance(target.value, ast.Name):
+            return None
+        if ctx.resolver.resolve(target.value) is not None:
+            return None
+        owner = ctx.classes.get(target.value.id)
+        method = None if owner is None else _class_method(owner, target.attr)
+        return None if method is None else (method, owner)
+    if not isinstance(target, ast.Name) or ctx.resolver.resolve(target) is not None:
+        return None
+    function = ctx.functions.get(target.id)
+    return None if function is None else (function, None)
+
+
+def _call_heartbeats(
+    ctx: CheckContext,
+    func: ast.expr,
+    owner: ast.ClassDef | None,
+    nested: set[str],
+    seen: set[int],
+) -> bool | None:
+    qualified = ctx.resolver.resolve(func)
+    if qualified is not None:
+        root = qualified.split(".", 1)[0]
+        return False if root in sys.stdlib_module_names or root == "temporalio" else None
+    if isinstance(func, ast.Name):
+        if func.id in nested:
+            return False
+        local = ctx.functions.get(func.id)
+        if local is not None:
+            return _heartbeats(ctx, local, None, seen)
+        if func.id in ctx.classes or func.id not in vars(builtins):
+            return None
+        return False
+    if isinstance(func, ast.Attribute):
+        if isinstance(func.value, ast.Call):
+            return None
+        if isinstance(func.value, ast.Name) and func.value.id in {"self", "cls"} and owner:
+            method = _class_method(owner, func.attr)
+            return None if method is None else _heartbeats(ctx, method, owner, seen)
+        # Methods on other objects are assumed not to heartbeat.
+        return False
+    return None
+
+
+def _heartbeats(
+    ctx: CheckContext, function: FunctionNode, owner: ast.ClassDef | None, seen: set[int]
+) -> bool | None:
+    if id(function) in seen:
+        return False
+    seen.add(id(function))
+    nested = {
+        child.name
+        for child in ast.walk(function)
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child is not function
+    }
+    unknown = False
+    for child in ast.walk(function):
+        if (
+            isinstance(child, (ast.Name, ast.Attribute))
+            and ctx.resolver.resolve(child) == f"{ACTIVITY}.heartbeat"
+        ):
+            return True
+        if not isinstance(child, ast.Call):
+            continue
+        result = _call_heartbeats(ctx, child.func, owner, nested, seen)
+        if result:
+            return True
+        if result is None:
+            unknown = True
+    return None if unknown else False
+
+
+def check_missing_heartbeat(ctx: CheckContext, node: ast.AST) -> None:
+    if not isinstance(node, ast.Call):
+        return
+    name = _workflow_call_name(ctx.resolver, node.func, _HEARTBEAT_FUNCS)
+    if name is None:
+        return
+    timeout = _keyword_value(node, "heartbeat_timeout")
+    if timeout is None or _is_none(timeout):
+        return
+    target = _activity_target(ctx, name, node)
+    if target is None:
+        return
+    function, owner = target
+    # Any other decorator, such as an auto-heartbeat wrapper, may heartbeat.
+    decorators = function.decorator_list
+    if (
+        len(decorators) != 1
+        or _decorator_qualified(ctx.resolver, decorators[0]) != f"{ACTIVITY}.defn"
+    ):
+        return
+    if _heartbeats(ctx, function, owner, set()) is not False:
+        return
+    label = function.name if owner is None else f"{owner.name}.{function.name}"
+    ctx.report(
+        node,
+        "TPL004",
+        f'{name} sets heartbeat_timeout but activity "{label}" never calls activity.heartbeat',
+    )
 
 
 def check_missing_await(ctx: CheckContext, node: ast.AST) -> None:
@@ -234,7 +471,7 @@ def check_missing_await(ctx: CheckContext, node: ast.AST) -> None:
     name = _workflow_call_name(ctx.resolver, node.value.func, _AWAITED_FUNCS)
     if name is None:
         return
-    ctx.report(node.value, "TPL002", f"{name} returns a coroutine that is not awaited")
+    ctx.report(node.value, "TPL007", f"{name} returns a coroutine that is not awaited")
 
 
 def check_workflow_defn_shape(ctx: CheckContext, node: ast.AST) -> None:
@@ -249,19 +486,19 @@ def check_workflow_defn_shape(ctx: CheckContext, node: ast.AST) -> None:
         and _has_decorator(ctx.resolver, statement, f"{WORKFLOW}.run")
     ]
     if len(run_methods) == 0:
-        ctx.report(node, "TPL003", f'workflow class "{node.name}" has no @workflow.run method')
+        ctx.report(node, "TPL005", f'workflow class "{node.name}" has no @workflow.run method')
         return
     if len(run_methods) > 1:
         ctx.report(
             node,
-            "TPL003",
+            "TPL005",
             f'workflow class "{node.name}" has {len(run_methods)} @workflow.run methods, want exactly one',
         )
     for method in run_methods:
         if isinstance(method, ast.FunctionDef):
             ctx.report(
                 method,
-                "TPL003",
+                "TPL005",
                 f'@workflow.run method "{method.name}" of workflow class "{node.name}" must be async',
             )
 
@@ -287,7 +524,7 @@ def check_nondeterministic_call(ctx: CheckContext, node: ast.AST) -> None:
         return
     ctx.report(
         node,
-        "TPL004",
+        "TPL008",
         f"nondeterministic {qualified} in workflow code; use {suggestion}",
     )
 
@@ -328,10 +565,10 @@ def check_workflow_logger(ctx: CheckContext, node: ast.AST) -> None:
         return
     if isinstance(node.func, ast.Name) and node.func.id == "print":
         if ctx.resolver.resolve(node.func) is None:
-            ctx.report(node, "TPL005", "print in workflow code; use workflow.logger")
+            ctx.report(node, "TPL009", "print in workflow code; use workflow.logger")
         return
     if _is_logging_call(ctx.resolver, node):
-        ctx.report(node, "TPL005", "logging in workflow code; use workflow.logger")
+        ctx.report(node, "TPL009", "logging in workflow code; use workflow.logger")
 
 
 # Builtin exception bases. IOError and EnvironmentError are OSError aliases.
@@ -455,6 +692,22 @@ def module_classes(tree: ast.AST) -> dict[str, ast.ClassDef | None]:
     if isinstance(tree, ast.Module):
         _collect_classes(tree.body, found)
     return found
+
+
+def module_functions(tree: ast.AST) -> dict[str, FunctionNode | None]:
+    found: dict[str, FunctionNode | None] = {}
+    if isinstance(tree, ast.Module):
+        _collect_functions(tree.body, found)
+    return found
+
+
+def _collect_functions(statements: list[ast.stmt], found: dict[str, FunctionNode | None]) -> None:
+    for statement in statements:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found[statement.name] = None if statement.name in found else statement
+        else:
+            for block in _nested_blocks(statement):
+                _collect_functions(block, found)
 
 
 def _collect_classes(
@@ -769,7 +1022,7 @@ class _WorkflowExceptionScanner(ast.NodeVisitor):
             return
         self._ctx.report(
             node,
-            "TPL018",
+            "TPL010",
             f"raise {_exception_name(expr)} in workflow code; "
             + "raise ApplicationError to fail the workflow",
         )
@@ -779,7 +1032,7 @@ class _WorkflowExceptionScanner(ast.NodeVisitor):
             return
         self._ctx.report(
             node,
-            "TPL018",
+            "TPL010",
             "assert in workflow code raises AssertionError; "
             + "raise ApplicationError to fail the workflow",
         )
@@ -803,9 +1056,12 @@ def check_workflow_exception(ctx: CheckContext, node: ast.AST) -> None:
 
 CALL_RULES: tuple[RuleCheck, ...] = (
     check_activity_timeout,
+    check_activity_retry,
     check_arg_and_args,
+    check_missing_heartbeat,
     check_nondeterministic_call,
     check_workflow_logger,
 )
 EXPR_RULES: tuple[RuleCheck, ...] = (check_missing_await,)
+FUNCTION_RULES: tuple[RuleCheck, ...] = (check_query_return,)
 CLASS_RULES: tuple[RuleCheck, ...] = (check_workflow_defn_shape, check_workflow_exception)

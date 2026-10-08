@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from temporalint.rules import RULE_CODES
+from temporalint.rules import DEFAULT_CODES, RULE_CODES
 
 _CONFIG_FILES = ("temporalint.toml", ".temporalint.toml", "pyproject.toml")
 
@@ -46,7 +46,7 @@ def load_config(start: Path) -> Config:
 
 
 def resolve_enabled(select: frozenset[str] | None, ignore: frozenset[str]) -> set[str]:
-    enabled = set(RULE_CODES) if select is None else set(select)
+    enabled = set(DEFAULT_CODES) if select is None else set(select)
     unknown = (enabled | set(ignore)) - RULE_CODES
     if unknown:
         names = ", ".join(sorted(unknown))

@@ -30,7 +30,7 @@ def test_reports_findings_and_exits_1(
     assert captured.out.splitlines() == [
         f"{path}:2:1: TPL001 execute_activity sets neither "
         + "start_to_close_timeout nor schedule_to_close_timeout",
-        f"{path}:2:1: TPL002 execute_activity returns a coroutine that is not awaited",
+        f"{path}:2:1: TPL007 execute_activity returns a coroutine that is not awaited",
     ]
 
 
@@ -77,16 +77,16 @@ def test_select_and_ignore(
     _write(path, BARE_ACTIVITY)
     monkeypatch.chdir(tmp_path)
     assert main([str(path), "--ignore", "TPL001"]) == 0
-    assert main([str(path), "--select", "TPL004"]) == 0
+    assert main([str(path), "--select", "TPL008"]) == 0
     assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize(
     ("filename", "body"),
     [
-        ("pyproject.toml", '[tool.temporalint]\nignore = ["TPL004"]\nexclude = ["skip/**"]\n'),
-        ("temporalint.toml", 'ignore = ["TPL004"]\nexclude = ["skip/**"]\n'),
-        (".temporalint.toml", 'ignore = ["TPL004"]\nexclude = ["skip/**"]\n'),
+        ("pyproject.toml", '[tool.temporalint]\nignore = ["TPL008"]\nexclude = ["skip/**"]\n'),
+        ("temporalint.toml", 'ignore = ["TPL008"]\nexclude = ["skip/**"]\n'),
+        (".temporalint.toml", 'ignore = ["TPL008"]\nexclude = ["skip/**"]\n'),
     ],
 )
 def test_config_ignore_exclude_and_explicit_file(
@@ -136,7 +136,7 @@ def test_temporalint_toml_overrides_pyproject(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write(tmp_path / "pyproject.toml", '[tool.temporalint]\nignore = ["TPL001"]\n')
-    _write(tmp_path / "temporalint.toml", 'ignore = ["TPL001", "TPL002"]\n')
+    _write(tmp_path / "temporalint.toml", 'ignore = ["TPL001", "TPL007"]\n')
     _write(tmp_path / "workflow.py", BARE_ACTIVITY)
     monkeypatch.chdir(tmp_path)
     assert main([]) == 0

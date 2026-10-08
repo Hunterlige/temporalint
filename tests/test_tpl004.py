@@ -1,119 +1,172 @@
-"""Workflow code must not call nondeterministic stdlib functions."""
+"""An activity started with heartbeat_timeout must heartbeat."""
 
 from tests.helpers import hits, lint
 
+TPL004 = {"TPL004"}
 
-def test_stdlib_calls_inside_a_workflow() -> None:
+
+def test_activity_that_never_heartbeats() -> None:
     diagnostics = lint(
         """\
-        import datetime
-        import os
-        import random
-        import secrets
-        import time
-        import uuid
-        from temporalio import workflow
+        import asyncio
+        from temporalio import activity, workflow
+
+        @activity.defn
+        async def compute(n: int) -> int:
+            await asyncio.sleep(60)
+            return len(str(n))
+
+        class Activities:
+            @activity.defn(name="process")
+            async def process(self) -> None:
+                self.prepare()
+
+            def prepare(self) -> None:
+                self.client.send()
 
         @workflow.defn
-        class Greeting:
+        class Flow:
             @workflow.run
             async def run(self) -> None:
-                datetime.datetime.now()
-                datetime.datetime.utcnow()
-                datetime.datetime.today()
-                datetime.date.today()
-                time.time()
-                time.time_ns()
-                time.monotonic()
-                time.perf_counter()
-                random.randint(1, 2)
-                secrets.token_hex()
-                os.urandom(4)
-                uuid.uuid4()
-                uuid.uuid1()
+                await workflow.execute_activity(
+                    compute, 1, start_to_close_timeout=t, heartbeat_timeout=t
+                )
+                await workflow.start_activity_method(
+                    Activities.process, start_to_close_timeout=t, heartbeat_timeout=t
+                )
         """
     )
-    assert [item.line for item in diagnostics] == list(range(13, 26))
-    assert {item.code for item in diagnostics} == {"TPL004"}
-    suggestions = {item.line: item.message for item in diagnostics}
-    assert "use workflow.now()" in suggestions[13]
-    assert "use workflow.random()" in suggestions[22]
-    assert "use workflow.uuid4()" in suggestions[25]
-    assert "datetime.datetime.now" in suggestions[13]
-
-
-def test_aliased_imports_and_nested_function() -> None:
-    assert hits(
-        """\
-        from datetime import datetime as dt
-        from datetime import date
-        from random import choice
-        from uuid import uuid4
-        from temporalio import workflow
-
-        @workflow.defn
-        class Greeting:
-            @workflow.run
-            async def run(self) -> None:
-                def nested() -> None:
-                    dt.now()
-                    date.today()
-                    choice([1])
-                    uuid4()
-
-                nested()
-        """
-    ) == [
-        (12, "TPL004"),
-        (13, "TPL004"),
-        (14, "TPL004"),
-        (15, "TPL004"),
+    assert [(item.line, item.code) for item in diagnostics] == [
+        (21, "TPL004"),
+        (24, "TPL004"),
     ]
+    assert diagnostics[0].message == (
+        'execute_activity sets heartbeat_timeout but activity "compute" never calls activity.heartbeat'
+    )
+    assert diagnostics[1].message == (
+        "start_activity_method sets heartbeat_timeout but activity "
+        + '"Activities.process" never calls activity.heartbeat'
+    )
 
 
-def test_calls_outside_the_workflow_are_ignored() -> None:
+def test_heartbeating_activities_are_valid() -> None:
     assert (
         hits(
             """\
-        import random
-        from datetime import datetime
-        from temporalio import workflow
+        from temporalio import activity, workflow
+        from temporalio.activity import heartbeat as beat
 
-        def helper() -> None:
-            datetime.now()
-            random.random()
+        @activity.defn
+        async def direct() -> None:
+            activity.heartbeat()
 
-        @workflow.defn
-        class Greeting:
-            @workflow.run
-            async def run(self) -> None:
-                helper()
-                workflow.now()
-                workflow.uuid4()
-                workflow.random()
-        """
+        @activity.defn
+        async def aliased() -> None:
+            beat("progress")
+
+        def report() -> None:
+            activity.heartbeat()
+
+        @activity.defn
+        async def through_helper() -> None:
+            report()
+
+        @activity.defn
+        async def nested() -> None:
+            def tick() -> None:
+                activity.heartbeat()
+
+            tick()
+
+        @activity.defn
+        async def as_callback() -> None:
+            run(callback=activity.heartbeat)
+
+        class Activities:
+            @activity.defn
+            async def process(self) -> None:
+                self.tick()
+
+            def tick(self) -> None:
+                activity.heartbeat()
+
+        await workflow.execute_activity(direct, heartbeat_timeout=t)
+        await workflow.execute_activity(aliased, heartbeat_timeout=t)
+        await workflow.execute_activity(through_helper, heartbeat_timeout=t)
+        await workflow.execute_activity(nested, heartbeat_timeout=t)
+        await workflow.execute_activity(as_callback, heartbeat_timeout=t)
+        await workflow.execute_activity_method(Activities.process, heartbeat_timeout=t)
+        """,
+            TPL004,
         )
         == []
     )
 
 
-def test_deterministic_stdlib_calls_are_ignored() -> None:
+def test_calls_that_may_heartbeat_are_skipped() -> None:
     assert (
         hits(
             """\
-        import time
-        import uuid
-        from datetime import datetime
-        from temporalio import workflow
+        from temporalio import activity, workflow
+        from myapp.work import do_work
+        from myapp.wrappers import auto_heartbeater
 
-        @workflow.defn
-        class Greeting:
-            @workflow.run
-            async def run(self) -> None:
-                datetime.fromisoformat("2020-01-01")
-                time.sleep(1)
-                uuid.uuid5(uuid.NAMESPACE_DNS, "example")
-        """
+        @activity.defn
+        async def imported_helper() -> None:
+            await do_work()
+
+        @activity.defn
+        async def unknown_name(callback) -> None:
+            callback()
+
+        @auto_heartbeater
+        @activity.defn
+        async def wrapped() -> None:
+            return None
+
+        class Base:
+            @activity.defn
+            async def process(self) -> None:
+                self.inherited()
+
+            @activity.defn
+            async def parent(self) -> None:
+                super().process()
+
+        await workflow.execute_activity(imported_helper, heartbeat_timeout=t)
+        await workflow.execute_activity(unknown_name, heartbeat_timeout=t)
+        await workflow.execute_activity(wrapped, heartbeat_timeout=t)
+        await workflow.execute_activity_method(Base.process, heartbeat_timeout=t)
+        await workflow.execute_activity_method(Base.parent, heartbeat_timeout=t)
+        """,
+            TPL004,
+        )
+        == []
+    )
+
+
+def test_unresolved_targets_and_no_timeout_are_skipped() -> None:
+    assert (
+        hits(
+            """\
+        from temporalio import activity, workflow
+        from myapp.activities import imported
+
+        @activity.defn
+        async def idle() -> None:
+            return None
+
+        def plain() -> None:
+            return None
+
+        await workflow.execute_activity(idle, start_to_close_timeout=t)
+        await workflow.execute_activity(idle, start_to_close_timeout=t, heartbeat_timeout=None)
+        await workflow.execute_activity(imported, heartbeat_timeout=t)
+        await workflow.execute_activity("idle", heartbeat_timeout=t)
+        await workflow.execute_activity(plain, heartbeat_timeout=t)
+        await workflow.execute_local_activity(idle, start_to_close_timeout=t)
+        """,
+            TPL004,
         )
         == []
     )
@@ -123,15 +176,15 @@ def test_noqa() -> None:
     assert (
         hits(
             """\
-        from datetime import datetime
-        from temporalio import workflow
+        from temporalio import activity, workflow
 
-        @workflow.defn
-        class Greeting:
-            @workflow.run
-            async def run(self) -> None:
-                datetime.now()  # noqa: TPL004
-        """
+        @activity.defn
+        async def idle() -> None:
+            return None
+
+        await workflow.execute_activity(idle, heartbeat_timeout=t)  # noqa: TPL004
+        """,
+            TPL004,
         )
         == []
     )

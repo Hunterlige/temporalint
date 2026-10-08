@@ -15,10 +15,10 @@ def test_missing_timeout_on_execute_and_start_variants() -> None:
         """
     ) == [
         (3, "TPL001"),
-        (3, "TPL002"),
+        (3, "TPL007"),
         (4, "TPL001"),
         (5, "TPL001"),
-        (5, "TPL002"),
+        (5, "TPL007"),
         (6, "TPL001"),
     ]
 
@@ -89,12 +89,12 @@ def test_noqa_suppresses_only_the_named_code() -> None:
         from temporalio import workflow
 
         workflow.execute_activity(greet)  # noqa: TPL001
-        workflow.start_activity(greet)  # noqa: TPL002
+        workflow.start_activity(greet)  # noqa: TPL007
         workflow.execute_activity(greet)  # noqa
         """
     )
     assert [(item.line, item.code) for item in diagnostics] == [
-        (3, "TPL002"),
+        (3, "TPL007"),
         (4, "TPL001"),
     ]
     assert diagnostics[0].col == 1
