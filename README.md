@@ -1,8 +1,8 @@
 # temporalint
 
-[![PyPI](https://img.shields.io/pypi/v/temporalint.svg)](https://pypi.org/project/temporalint/)
-[![License](https://img.shields.io/pypi/l/temporalint.svg)](https://github.com/Hunterlige/temporalint/blob/main/LICENSE)
-[![Python versions](https://img.shields.io/pypi/pyversions/temporalint.svg)](https://pypi.org/project/temporalint/)
+[![PyPI](https://img.shields.io/pypi/v/temporalint)](https://pypi.org/project/temporalint/)
+[![License](https://img.shields.io/pypi/l/temporalint)](https://github.com/Hunterlige/temporalint/blob/main/LICENSE)
+[![Python versions](https://img.shields.io/pypi/pyversions/temporalint)](https://pypi.org/project/temporalint/)
 [![CI](https://github.com/Hunterlige/temporalint/actions/workflows/ci.yml/badge.svg)](https://github.com/Hunterlige/temporalint/actions)
 
 Static checks for [Temporal](https://docs.temporal.io/) Python SDK code. Temporal's workflow APIs fail at runtime for mistakes Python will not catch: a missing activity timeout, a discarded coroutine, a workflow class the worker will reject, or a nondeterministic call that breaks replay.
