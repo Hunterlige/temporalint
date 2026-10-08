@@ -5,14 +5,10 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/temporalint.svg)](https://pypi.org/project/temporalint/)
 [![CI](https://github.com/Hunterlige/temporalint/actions/workflows/ci.yml/badge.svg)](https://github.com/Hunterlige/temporalint/actions)
 
-> [!WARNING]
-> This README was written by a human, but all code changes, PR summaries, and additional documentation were authored entirely by AI in Cursor.
-
 Static checks for [Temporal](https://docs.temporal.io/) Python SDK code. Temporal's workflow APIs fail at runtime for mistakes Python will not catch: a missing activity timeout, a discarded coroutine, a workflow class the worker will reject, or a nondeterministic call that breaks replay.
 
-`temporalint` reports only patterns that are unambiguous. If it cannot resolve a call (a star import, a dot import, `**kwargs`, or a helper defined outside the workflow), it stays quiet.
-
-The linter uses the standard library only. It does not import `temporalio` and does not run the code it checks.
+> [!WARNING]
+> This README was written by a human, but all code changes, PR summaries, and additional documentation were authored entirely by AI in Cursor.
 
 ## Install
 
@@ -24,12 +20,6 @@ pip install temporalint
 
 ```sh
 temporalint [paths...] [--select TPL001,TPL002] [--ignore TPL005]
-```
-
-Output is one finding per line:
-
-```text
-workflow.py:14:5: TPL001 execute_activity sets neither start_to_close_timeout nor schedule_to_close_timeout
 ```
 
 ## Rules

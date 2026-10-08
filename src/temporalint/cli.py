@@ -4,8 +4,10 @@
 # ruff: noqa: T201
 
 import argparse
+import functools
+import re
 import sys
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from temporalint.checker import check_file
 from temporalint.config import Config, ConfigError, load_config, resolve_enabled
@@ -98,5 +100,42 @@ def _is_excluded(path: Path, config: Config) -> bool:
         relative = resolved.relative_to(config.root.resolve()).as_posix()
     except ValueError:
         relative = resolved.as_posix()
-    candidate = PurePosixPath(relative)
-    return any(candidate.full_match(pattern) for pattern in config.exclude)
+    return any(_compile_glob(pattern).fullmatch(relative) for pattern in config.exclude)
+
+
+@functools.cache
+def _compile_glob(pattern: str) -> re.Pattern[str]:
+    segments = pattern.split("/")
+    regex: list[str] = []
+    for index, segment in enumerate(segments):
+        is_last = index == len(segments) - 1
+        if segment == "**":
+            regex.append(".*" if is_last else "(?:[^/]+/)*")
+            continue
+        regex.append(_translate_segment(segment))
+        if not is_last:
+            regex.append("/")
+    return re.compile("".join(regex))
+
+
+def _translate_segment(segment: str) -> str:
+    regex: list[str] = []
+    index = 0
+    while index < len(segment):
+        char = segment[index]
+        index += 1
+        if char == "*":
+            regex.append("[^/]*")
+        elif char == "?":
+            regex.append("[^/]")
+        elif char == "[" and (end := segment.find("]", index + 1)) != -1:
+            body = segment[index:end].replace("\\", "\\\\")
+            if body.startswith("!"):
+                body = "^" + body[1:]
+            elif body.startswith("^"):
+                body = "\\" + body
+            regex.append("[" + body + "]")
+            index = end + 1
+        else:
+            regex.append(re.escape(char))
+    return "".join(regex)
